@@ -6,7 +6,7 @@ Follow https://huggingface.co/docs/lerobot/en/installation to get set up.
 
 When cloned lerobot git repository move mqtt_lerobot_teleoperate.py into src/lerobot/scripts.
 
-Then calibrate arms using the so-11 guide https://huggingface.co/docs/lerobot/en/so101#calibrate.
+Then calibrate arms using the so-101 guide https://huggingface.co/docs/lerobot/en/so101#calibrate.
 
 And then start using teleoperation by using https://huggingface.co/docs/lerobot/en/il_robots but instead of 
 
