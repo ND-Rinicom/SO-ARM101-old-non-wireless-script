@@ -25,16 +25,15 @@ For digital twin MQTT teleopratoin use
 ```
 python src/lerobot/scripts/mqtt_lerobot_teleoperate.py \
     --robot.type=so101_follower \
-    --robot.port=/dev/tty.usbmodem58760431541 \
-    --robot.id=my_awesome_follower_arm \
+    --robot.port=/dev/ttyACM1 \
+    --robot.id=follower_arm \
     --teleop.type=so101_leader \
-    --teleop.port=/dev/tty.usbmodem58760431551 \
-    --teleop.id=my_awesome_leader_arm \
+    --teleop.port=/dev/ttyACM0 \
+    --teleop.id=leader_arm \
     # Optional MQTT configuration (these are the defaults):
     --mqtt_enable=true \
-    --mqtt_host=192.168.1.107 \
+    --mqtt_host=0.0.0.0 \
     --mqtt_port=1883 \
     --mqtt_topic=watchman_robotarm/so-101 \
     --mqtt_units=degrees \
-    --capture_zero_offsets_at_start=true \
 ```

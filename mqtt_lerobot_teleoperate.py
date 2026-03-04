@@ -18,7 +18,6 @@ Teleoperation script with MQTT publishing of follower joint commands.
 Adds:
 - MQTT publish to a fixed broker/topic
 - Mapping from LeRobot action keys -> your frontend JSON schema
-- Auto-capture "zero offsets" at start so the first command becomes 0 pose in the frontend
 
 Install dependency:
     pip install paho-mqtt
@@ -46,9 +45,9 @@ except Exception as e:  # pragma: no cover
 else:
     _mqtt_import_error = None
 
-MQTT_HOST = "192.168.1.107"
+MQTT_HOST = "0.0.0.0"
 MQTT_PORT = 1883
-MQTT_TOPIC = "watchman_robotarm/so-101"
+MQTT_TOPIC = "watchman_robotarm/so-101/leader"
 
 # ---- LeRobot ----
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
@@ -103,45 +102,16 @@ from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 def iso_utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-
-AXIS_BY_FRONTEND_JOINT = {
-    "shoulder_pan": "y",
-    "shoulder_lift": "x",
-    "elbow_flex": "x",
-    "wrist_flex": "x",
-    "wrist_roll": "y",
-    "gripper": "z",
-}
-
-# Scale factors for joints that need different ranges for frontend vs hardware
-JOINT_SCALE_FACTORS = {
-    "wrist_roll": 1.8,  # Hardware uses ~[-100, 100], frontend expects [-180, 180]
-    "gripper": 1.2,
-}
-
-
-def apply_zero_offsets(action: dict[str, float], zero_offsets: dict[str, float]) -> dict[str, float]:
-    """Return action with per-joint zero offsets subtracted."""
-    return {k: float(v) - float(zero_offsets.get(k, 0.0)) for k, v in action.items()}
-
-
 def action_to_frontend_payload(robot_action_to_send: dict[str, float], units: str) -> dict[str, Any]:
     """Convert LeRobot action dict into your frontend JSON schema."""
     joints: dict[str, dict[str, float]] = {}
     for lerobot_joint, value in robot_action_to_send.items():
         # Strip .pos suffix to get frontend joint name
         frontend_joint = lerobot_joint.replace(".pos", "")
-        if frontend_joint not in AXIS_BY_FRONTEND_JOINT:
-            continue
-        axis = AXIS_BY_FRONTEND_JOINT[frontend_joint]
-        # Apply joint-specific scale factor if configured
-        scaled_value = float(value) * JOINT_SCALE_FACTORS.get(frontend_joint, 1.0)
-        # Negate z axis values (gripper) and wrist_roll
-        final_value = -scaled_value if (axis == "z" or frontend_joint == "wrist_roll") else scaled_value
-        joints[frontend_joint] = {axis: final_value}
+        joints[frontend_joint] = value
 
     return {
-        "method": "set_joint_angles",
+        "method": "set_follower_joint_angles",
         "timestamp": iso_utc_now(),
         "params": {
             "units": units,  # "degrees" or "radians"
@@ -254,9 +224,6 @@ class TeleoperateConfig:
     # If you run with --robot.use_degrees=true --teleop.use_degrees=true, set this to "degrees".
     mqtt_units: str = "degrees"
 
-    # Capture zero offsets at start, so the first sent action becomes 0 in the frontend
-    capture_zero_offsets_at_start: bool = True
-
 
 def teleop_loop(
     teleop: Teleoperator,
@@ -270,13 +237,9 @@ def teleop_loop(
     display_compressed_images: bool = False,
     mqtt_pub: MQTTPublisher | None = None,
     mqtt_units: str = "degrees",
-    capture_zero_offsets_at_start: bool = True,
 ):
     display_len = max(len(key) for key in robot.action_features)
     start = time.perf_counter()
-
-    zero_offsets: dict[str, float] = {}
-    zero_offsets_captured = False
 
     while True:
         loop_start = time.perf_counter()
@@ -296,19 +259,10 @@ def teleop_loop(
         # Send to robot
         _ = robot.send_action(robot_action_to_send)
 
-        # Capture the "zero" offsets on the FIRST loop iteration (after processors)
-        # This makes the current pose show as 0s in your frontend.
-        if capture_zero_offsets_at_start and not zero_offsets_captured:
-            zero_offsets = {k: float(v) for k, v in robot_action_to_send.items()}
-            zero_offsets_captured = True
-            logging.info(f"Captured zero offsets (LeRobot action keys): {zero_offsets}")
-
         # Publish to MQTT (non-blocking)
         if mqtt_pub is not None:
             action_for_frontend = (
-                apply_zero_offsets(robot_action_to_send, zero_offsets)
-                if (capture_zero_offsets_at_start and zero_offsets_captured)
-                else {k: float(v) for k, v in robot_action_to_send.items()}
+                {k: float(v) for k, v in robot_action_to_send.items()}
             )
             payload = action_to_frontend_payload(action_for_frontend, units=mqtt_units)
             mqtt_pub.publish_json(payload)
@@ -379,7 +333,6 @@ def teleoperate(cfg: TeleoperateConfig):
             display_compressed_images=display_compressed_images,
             mqtt_pub=mqtt_pub,
             mqtt_units=cfg.mqtt_units,
-            capture_zero_offsets_at_start=cfg.capture_zero_offsets_at_start,
         )
     except KeyboardInterrupt:
         pass

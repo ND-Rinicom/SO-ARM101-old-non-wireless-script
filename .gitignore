@@ -1,0 +1,7 @@
+# Ignore local LeRobot checkout
+lerobot/
+
+# Ignore Miniforge installer and install directory
+Miniforge3-Linux-x86_64.sh
+miniforge/
+miniforge3/
