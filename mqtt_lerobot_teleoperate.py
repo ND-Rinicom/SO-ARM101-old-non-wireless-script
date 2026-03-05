@@ -26,12 +26,14 @@ Install dependency:
 import json
 import logging
 import queue
+import shutil
+import subprocess
 import threading
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pprint import pformat
-from typing import Any
+from typing import Any, Optional
 
 import rerun as rr
 
@@ -94,6 +96,87 @@ from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import init_logging, move_cursor_up
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
+
+
+# --------------------------
+# Camera/Streaming helpers
+# --------------------------
+def start_ustreamer(
+    device: str,
+    host: str = "0.0.0.0",
+    port: int = 8000,
+    resolution: str = "640x480",
+    fps: int = 24,
+    jpeg_quality: int = 80,
+    encoder: str = "cpu",
+    buffers: int = 2,
+) -> subprocess.Popen:
+    """
+    Start ustreamer as a background process for camera streaming.
+    Returns a Popen handle so we can terminate it on exit.
+    
+    Args:
+        device: V4L2 device path (e.g., /dev/video0)
+        host: Host to bind to (default: 0.0.0.0)
+        port: HTTP port (default: 8000)
+        resolution: Resolution string (default: 640x480)
+        fps: Frames per second (default: 30). Lower = less bandwidth.
+        jpeg_quality: JPEG quality 1-100 (default: 80). Lower = smaller/faster.
+        encoder: Encoder to use (default: "cpu"). Try "omx" on RPi for H.264.
+        buffers: Number of internal buffers (default: 2). Lower = less latency.
+    """
+    if shutil.which("ustreamer") is None:
+        raise RuntimeError(
+            "ustreamer not found. Install it with: sudo dnf install -y ustreamer (Fedora) or sudo apt install -y ustreamer (Debian/Ubuntu)"
+        )
+
+    cmd = [
+        "ustreamer",
+        f"--device={device}",
+        f"--host={host}",
+        f"--port={port}",
+        f"--resolution={resolution}",
+        f"--desired-fps={fps}",
+        f"--quality={jpeg_quality}",
+        f"--encoder={encoder}",
+        f"--buffers={buffers}",
+    ]
+
+    logging.info("Starting ustreamer: %s", " ".join(cmd))
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+
+    time.sleep(0.4)
+    if proc.poll() is not None:
+        out = ""
+        try:
+            out = (proc.stdout.read() or "").strip() if proc.stdout else ""
+        except Exception:
+            pass
+        raise RuntimeError(f"ustreamer exited immediately.\nOutput:\n{out}")
+    logging.info("ustreamer started (pid=%s). Stream: http://<device-ip>:%d/stream (fps=%d, quality=%d, encoder=%s, buffers=%d)", proc.pid, port, fps, jpeg_quality, encoder, buffers)
+    return proc
+
+
+def stop_process(proc: Optional[subprocess.Popen], name: str) -> None:
+    """Stop a subprocess gracefully."""
+    if not proc:
+        return
+    try:
+        if proc.poll() is None:
+            logging.info("Stopping %s (pid=%s)...", name, proc.pid)
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    except Exception as e:
+        logging.warning("Failed stopping %s: %s", name, e)
 
 
 # --------------------------
@@ -205,7 +288,7 @@ class MQTTPublisher:
 class TeleoperateConfig:
     teleop: TeleoperatorConfig
     robot: RobotConfig
-    fps: int = 60
+    fps: int = 24
     teleop_time_s: float | None = None
 
     # Display all cameras on screen
@@ -224,6 +307,17 @@ class TeleoperateConfig:
     # If you run with --robot.use_degrees=true --teleop.use_degrees=true, set this to "degrees".
     mqtt_units: str = "degrees"
 
+    # ustreamer camera settings (alternative to RTP)
+    camera_enable: bool = False
+    camera_device: str | None = None
+    camera_host: str = "0.0.0.0"
+    camera_port: int = 8000
+    camera_resolution: str = "640x480"
+    camera_fps: int = 24  # Lower = less bandwidth. Try 15-20 for WiFi.
+    camera_jpeg_quality: int = 80  # 1-100. Lower = smaller/faster. Try 50-70 for WiFi.
+    camera_encoder: str = "cpu"  # "cpu" or "omx" (RPi H.264). "omx" is better for WiFi.
+    camera_buffers: int = 2  # Lower = less latency but choppier. Try 1 for minimal lag.
+
 
 def teleop_loop(
     teleop: Teleoperator,
@@ -237,9 +331,13 @@ def teleop_loop(
     display_compressed_images: bool = False,
     mqtt_pub: MQTTPublisher | None = None,
     mqtt_units: str = "degrees",
+    camera_proc: subprocess.Popen | None = None,
 ):
     display_len = max(len(key) for key in robot.action_features)
     start = time.perf_counter()
+
+    last_action = None
+    last_send_time = 0.0
 
     while True:
         loop_start = time.perf_counter()
@@ -256,16 +354,26 @@ def teleop_loop(
         # Produce action to send to follower
         robot_action_to_send = robot_action_processor((teleop_action, obs))
 
+        # Throttle: only send if action changed, or 0.25s passed since last send
+        now = time.perf_counter()
+        should_send = False
+        if last_action is None or teleop_action != last_action:
+            should_send = True
+        elif (now - last_send_time) >= 0.25:
+            should_send = True
+
         # Send to robot
         _ = robot.send_action(robot_action_to_send)
 
         # Publish to MQTT (non-blocking)
-        if mqtt_pub is not None:
+        if mqtt_pub is not None and should_send:
             action_for_frontend = (
                 {k: float(v) for k, v in robot_action_to_send.items()}
             )
             payload = action_to_frontend_payload(action_for_frontend, units=mqtt_units)
             mqtt_pub.publish_json(payload)
+            last_action = teleop_action.copy() if hasattr(teleop_action, 'copy') else dict(teleop_action)
+            last_send_time = now
 
         # Display (optional)
         if display_data:
@@ -313,6 +421,23 @@ def teleoperate(cfg: TeleoperateConfig):
         mqtt_pub.start()
         logging.info(f"MQTT publishing enabled: topic='{cfg.mqtt_topic}' broker={cfg.mqtt_host}:{cfg.mqtt_port}")
 
+    camera_proc: subprocess.Popen | None = None
+    if cfg.camera_enable and cfg.camera_device:
+        try:
+            camera_proc = start_ustreamer(
+                device=cfg.camera_device,
+                host=cfg.camera_host,
+                port=cfg.camera_port,
+                resolution=cfg.camera_resolution,
+                fps=cfg.camera_fps,
+                jpeg_quality=cfg.camera_jpeg_quality,
+                encoder=cfg.camera_encoder,
+                buffers=cfg.camera_buffers,
+            )
+        except RuntimeError as e:
+            logging.error(f"Failed to start camera: {e}")
+            camera_proc = None
+
     teleop = make_teleoperator_from_config(cfg.teleop)
     robot = make_robot_from_config(cfg.robot)
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
@@ -333,6 +458,7 @@ def teleoperate(cfg: TeleoperateConfig):
             display_compressed_images=display_compressed_images,
             mqtt_pub=mqtt_pub,
             mqtt_units=cfg.mqtt_units,
+            camera_proc=camera_proc,
         )
     except KeyboardInterrupt:
         pass
@@ -345,6 +471,7 @@ def teleoperate(cfg: TeleoperateConfig):
             robot.disconnect()
         if mqtt_pub is not None:
             mqtt_pub.stop()
+        stop_process(camera_proc, "ustreamer")
 
 
 def main():
