@@ -23,7 +23,7 @@ lerobot-teleoperate \
 For digital twin MQTT teleopratoin use 
 
 ```
-python src/lerobot/scripts/mqtt_lerobot_teleoperate.py \
+python lerobot/src/lerobot/scripts/mqtt_lerobot_teleoperate.py \
     --robot.type=so101_follower \
     --robot.port=/dev/ttyACM1 \
     --robot.id=follower_arm \
