@@ -26,8 +26,8 @@ python lerobot/src/lerobot/scripts/mqtt_lerobot_teleoperate.py \
     --camera_resolution=640x480 \
     --camera_fps=15 \
     --camera_jpeg_quality=50 \
-    --camera_buffers=1
-    --host=10.185.80.233 \
+    --camera_buffers=1 \
+    --camera_host=10.185.80.233 
 ```
 
 ## Parameters
